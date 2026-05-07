@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<script>
+var taskPaneId = null;
+var AI_URL = location.origin + "/ui/index.html?v=7";
+
+function OnAddinLoad(ribbon) {
+    return true;
+}
+
+function OnAction(control) {
+    var id = control.Id;
+    if (id === "btnShowAIPane") {
+        showAIPane();
+    }
+}
+
+function showAIPane() {
+    // 1. 尝试复用已有任务窗格
+    if (taskPaneId) {
+        try {
+            var existing = window.Application.GetTaskPane(taskPaneId);
+            if (existing) { existing.Visible = true; return; }
+        } catch(_) {}
+        taskPaneId = null;
+    }
+
+    // 2. 尝试创建任务窗格（Writer/ET/WPP 支持，PDF 不支持）
+    try {
+        var pane = window.Application.CreateTaskPane(AI_URL);
+        if (pane) {
+            pane.DockPosition = window.Application.Enum
+                ? window.Application.Enum.msoCTPDockPositionRight
+                : 3;
+            pane.Width = 380;
+            pane.Visible = true;
+            taskPaneId = pane.TaskPaneId || null;
+            if (window.Application.PluginStorage) {
+                window.Application.PluginStorage.setItem("ai_taskpane_id", taskPaneId);
+            }
+            return;
+        }
+    } catch(_) {}
+
+    // 3. 降级：PDF 等不支持任务窗格 → 让后端用系统浏览器打开
+    fetch(location.origin + '/api/open-ui').catch(function() {
+        alert('无法打开 AI 助手，请确认服务已启动');
+    });
+}
+</script>
+</body>
+</html>

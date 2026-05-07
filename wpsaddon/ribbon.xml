@@ -1,0 +1,11 @@
+<customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui" onLoad="OnAddinLoad">
+    <ribbon startFromScratch="false">
+        <tabs>
+            <tab id="wpsAIAgentTab" label="AI 助手">
+                <group id="wpsAIAgentGroup" label="WPS AI">
+                    <button id="btnShowAIPane" label="AI 助手" onAction="OnAction" enabled="true" visible="true" size="large"/>
+                </group>
+            </tab>
+        </tabs>
+    </ribbon>
+</customUI>

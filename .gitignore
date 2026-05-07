@@ -1,0 +1,26 @@
+# Build output
+dist/
+build/
+*.spec
+*.exe
+
+# Runtime
+wps_agent.lock
+histories/
+snapshots/
+wps_debug.log
+
+# Config with real API key
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.vscode/
+
+# OS
+Thumbs.db
+Desktop.ini

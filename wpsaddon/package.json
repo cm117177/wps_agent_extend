@@ -1,0 +1,10 @@
+{
+  "name": "wps-ai-agent",
+  "version": "1.0.0",
+  "description": "WPS AI Assistant Plugin",
+  "addonType": "wps",
+  "supportedApps": ["wps", "et", "wpp"],
+  "scripts": {
+    "start": "wpsjs debug"
+  }
+}

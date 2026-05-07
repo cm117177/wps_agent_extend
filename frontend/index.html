@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WPS AI 助手</title>
+  <link rel="stylesheet" href="style.css?v=2">
+</head>
+<body>
+  <!-- ===== Header toolbar ===== -->
+  <header id="header">
+    <span class="logo">WPS AI 助手</span>
+    <div class="toolbar">
+      <button id="btn-undo" class="tool-btn" title="撤销上次操作 (Ctrl+Z)" disabled>↩</button>
+      <button id="btn-history" class="tool-btn" title="历史对话">📋</button>
+      <button id="btn-new" class="tool-btn" title="新对话">➕</button>
+      <button id="btn-settings" class="tool-btn" title="设置">⚙</button>
+    </div>
+  </header>
+
+  <!-- 诊断条：JS 加载后会立即隐藏 -->
+  <div id="js-check" style="position:fixed;top:44px;left:0;right:0;background:#e53935;color:#fff;font-size:11px;text-align:center;padding:3px;z-index:999">JS未加载（缓存旧版本）</div>
+
+  <!-- ===== Status bar ===== -->
+  <div id="status-bar">
+    <span id="status-dot" class="dot dot-gray"></span>
+    <span id="status-text">正在连接服务...</span>
+    <span id="ctx-indicator" class="ctx-indicator hidden"></span>
+  </div>
+
+  <!-- ===== Document selector (shown when WPS detected) ===== -->
+  <div id="doc-selector-wrap" class="hidden">
+    <label>当前文档：</label>
+    <select id="doc-selector"></select>
+  </div>
+
+  <!-- ===== PDF control bar ===== -->
+  <div id="pdf-bar" class="hidden">
+    <span id="pdf-info">PDF 未提取</span>
+    <div class="pdf-bar-actions">
+      <select id="pdf-max-pages">
+        <option value="20">前20页</option>
+        <option value="50" selected>前50页</option>
+        <option value="100">前100页</option>
+        <option value="0">全部页</option>
+      </select>
+      <button id="btn-pdf-extract">重新提取</button>
+    </div>
+  </div>
+
+  <!-- ===== Main chat area ===== -->
+  <div id="chat-container">
+    <div id="messages"></div>
+  </div>
+
+  <!-- ===== Input area ===== -->
+  <div id="input-area">
+    <textarea id="user-input" placeholder="描述您需要的文档操作，或直接提问..." rows="3"></textarea>
+    <button id="btn-send">发送</button>
+  </div>
+
+  <!-- ===== History panel (slide-in from right) ===== -->
+  <div id="history-panel" class="panel hidden">
+    <div class="panel-header">
+      <span>历史对话</span>
+      <button class="panel-close" id="btn-history-close">✕</button>
+    </div>
+    <div id="history-list"></div>
+  </div>
+
+  <!-- ===== Settings panel (overlay) ===== -->
+  <div id="settings-panel" class="panel hidden">
+    <div class="panel-header">
+      <span>设置</span>
+      <button class="panel-close" id="btn-settings-close">✕</button>
+    </div>
+    <div class="settings-body">
+      <div class="field-group">
+        <label>API Key</label>
+        <input type="password" id="s-api-key" placeholder="请输入您的 API Key">
+        <small id="s-key-hint"></small>
+      </div>
+      <div class="field-group">
+        <label>模型</label>
+        <input type="text" id="s-model" list="model-list" placeholder="deepseek-chat">
+        <datalist id="model-list">
+          <option value="deepseek-chat">
+          <option value="deepseek-reasoner">
+          <option value="gpt-4o">
+          <option value="gpt-4o-mini">
+          <option value="qwen-max">
+          <option value="qwen-plus">
+          <option value="moonshot-v1-8k">
+        </datalist>
+      </div>
+      <div class="field-group">
+        <label>API 地址 (Base URL)</label>
+        <input type="text" id="s-base-url" placeholder="https://api.deepseek.com/v1">
+        <small>常用：DeepSeek / Qwen / OpenAI / Moonshot</small>
+      </div>
+      <div class="settings-actions">
+        <button id="btn-save-settings" class="btn-primary">保存</button>
+        <button id="btn-test-conn">测试连接</button>
+      </div>
+      <div id="settings-msg"></div>
+
+      <hr>
+      <div class="field-group">
+        <label>温度 (Temperature)</label>
+        <input type="number" id="s-temperature" min="0" max="2" step="0.1" value="0.3">
+      </div>
+      <div class="field-group">
+        <label>最大输出 Token</label>
+        <input type="number" id="s-max-tokens" min="256" max="8192" step="256" value="2048">
+      </div>
+
+      <hr>
+      <div class="provider-hints">
+        <p><strong>常用服务商 Base URL：</strong></p>
+        <ul>
+          <li>DeepSeek: <code>https://api.deepseek.com/v1</code></li>
+          <li>OpenAI: <code>https://api.openai.com/v1</code></li>
+          <li>通义千问: <code>https://dashscope.aliyuncs.com/compatible-mode/v1</code></li>
+          <li>Moonshot: <code>https://api.moonshot.cn/v1</code></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Overlay backdrop ===== -->
+  <div id="backdrop" class="hidden"></div>
+
+  <script>
+  // JS 加载成功，隐藏诊断条
+  (function() { var el = document.getElementById('js-check'); if (el) el.style.display = 'none'; })();
+
+  // ============================================================
+  // WPS Bridge
+  // ============================================================
+  var MAX_CONTEXT_CHARS = 3000;
+
+  var WPS = {
+    isAvailable: function() {
+      return typeof Application !== 'undefined';
+    },
+    detectApp: function() {
+      if (!this.isAvailable()) return 'none';
+      try { if (Application.ActivePDF) return 'pdf'; } catch(e) {}
+      try { if (Application.ActiveDocument) {
+        var fn = Application.ActiveDocument.FullName || '';
+        if (fn.toLowerCase().indexOf('.pdf') !== -1) return 'pdf';
+        return 'writer';
+      } } catch(e) {}
+      try { if (Application.ActiveWorkbook) return 'et'; } catch(e) {}
+      try { if (Application.ActivePresentation) return 'wpp'; } catch(e) {}
+      return 'unknown';
+    },
+    getPDFPath: function() {
+      try { var p = Application.ActivePDF; if (p) return p.FullName || (p.Path + '\\' + p.Name); } catch(e) {}
+      try { var fn = Application.ActiveDocument.FullName; if (fn && fn.toLowerCase().indexOf('.pdf') !== -1) return fn; } catch(e) {}
+      return null;
+    },
+    getApp: function(type) {
+      if (typeof Application === 'undefined') throw new Error('WPS API 不可用');
+      return Application;
+    }
+  };
+
+  function truncateCtx(text, max) {
+    if (!text || text.length <= max) return { text: text || '', truncated: false };
+    return { text: text.substring(0, max), truncated: true, originalLen: text.length };
+  }
+
+  function getDocumentContext() {
+    if (!WPS.isAvailable()) return Promise.resolve(null);
+    var ctx = { type: WPS.detectApp() };
+    try {
+      if (ctx.type === 'writer' || ctx.type === 'unknown') {
+        var sel = Application.ActiveDocument.ActiveWindow.Selection;
+        var selR = truncateCtx(sel.Text ? sel.Text.trim() : '', MAX_CONTEXT_CHARS);
+        ctx.selectedText = selR.text;
+        ctx.selectedTruncated = selR.truncated;
+        ctx.selectedOriginalLen = selR.originalLen;
+        var paraR = truncateCtx(
+          sel.Paragraphs.Item(1).Range.Text ? sel.Paragraphs.Item(1).Range.Text.trim() : '',
+          MAX_CONTEXT_CHARS
+        );
+        ctx.currentParagraph = paraR.text;
+        ctx.paragraphTruncated = paraR.truncated;
+        ctx.paragraphOriginalLen = paraR.originalLen;
+        ctx.documentName = Application.ActiveDocument.Name;
+        try { ctx.pageCount = Application.ActiveDocument.BuiltInDocumentProperties('Number of Pages'); } catch(_) {}
+      }
+    } catch(e) {
+      ctx.error = e.message;
+    }
+    return Promise.resolve(ctx);
+  }
+
+  function buildContextPrefix(ctx) {
+    // PDF mode: prepend extracted text as context
+    if (pdfExtractedText) {
+      var MAX_PDF = 12000;
+      var snippet = pdfExtractedText.length > MAX_PDF ? pdfExtractedText.substring(0, MAX_PDF) : pdfExtractedText;
+      var note = pdfExtractedText.length > MAX_PDF ? '（已截取前' + MAX_PDF + '字，共' + pdfExtractedText.length + '字）' : '';
+      return '[PDF文档内容 ' + note + ']\n' + snippet + '\n\n[用户问题]\n';
+    }
+    if (!ctx) return '';
+    if (ctx.selectedText) {
+      var note = ctx.selectedTruncated ? '（已截取，原长' + ctx.selectedOriginalLen + '字）' : '';
+      return '[用户选中文字' + note + ': "' + ctx.selectedText + '"]\n\n';
+    }
+    if (ctx.currentParagraph) {
+      var note2 = ctx.paragraphTruncated ? '（已截取，原长' + ctx.paragraphOriginalLen + '字）' : '';
+      return '[当前段落' + note2 + ': "' + ctx.currentParagraph + '"]\n\n';
+    }
+    return '';
+  }
+
+  function listOpenDocuments() {
+    if (!WPS.isAvailable()) return [];
+    try {
+      var docs = Application.Documents;
+      var result = [];
+      for (var i = 1; i <= docs.Count; i++) {
+        result.push({ index: i, name: docs.Item(i).Name, fullName: docs.Item(i).FullName });
+      }
+      return result;
+    } catch(_) { return []; }
+  }
+
+  function executeJSA(code) {
+    if (!code || !code.trim()) return Promise.resolve({ success: true, result: null });
+    try {
+      var fn = new Function(code);
+      var result = fn();
+      if (result && typeof result.then === 'function') {
+        return result.then(function(r) { return { success: true, result: r }; });
+      }
+      return Promise.resolve({ success: true, result: result });
+    } catch(err) {
+      return Promise.resolve({ success: false, error: err.message });
+    }
+  }
+
+  function undoLastJSA(steps) {
+    steps = steps || 1;
+    if (!WPS.isAvailable()) return Promise.resolve({ success: false, error: 'WPS 不可用' });
+    try {
+      Application.ActiveDocument.Undo(steps);
+      return Promise.resolve({ success: true });
+    } catch(err) {
+      return Promise.resolve({ success: false, error: err.message });
+    }
+  }
+
+  var _lastSnapshot = null;
+  function getLastSnapshot() { return _lastSnapshot; }
+  function clearSnapshot() { _lastSnapshot = null; }
+
+  function snapshotDocument() {
+    if (!WPS.isAvailable()) return Promise.resolve({ ok: false, error: 'WPS 不可用' });
+    var originalPath;
+    try {
+      originalPath = Application.ActiveDocument.FullName;
+    } catch(e) {
+      return Promise.resolve({ ok: false, error: e.message });
+    }
+    if (!originalPath) {
+      return Promise.resolve({ ok: false, error: '当前文档尚未保存，无法创建快照，请先按 Ctrl+S 保存', unsaved: true });
+    }
+    return fetch(API_BASE + '/api/snapshot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_path: originalPath })
+    }).then(function(res) { return res.json(); }).then(function(data) {
+      if (!data.ok) return { ok: false, error: data.error };
+      _lastSnapshot = { snapshot_path: data.snapshot_path, original_path: originalPath };
+      return { ok: true };
+    }).catch(function(e) { return { ok: false, error: e.message }; });
+  }
+
+  function restoreSnapshot() {
+    if (!_lastSnapshot) return Promise.resolve({ ok: false, error: '没有可用的快照' });
+    return fetch(API_BASE + '/api/snapshot/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_lastSnapshot)
+    }).then(function(res) { return res.json(); }).then(function(data) {
+      if (!data.ok) return { ok: false, error: data.error };
+      if (WPS.isAvailable()) {
+        try {
+          Application.ActiveDocument.Close(0);
+          Application.Documents.Open(_lastSnapshot.original_path);
+        } catch(_) {}
+      }
+      return { ok: true };
+    }).catch(function(e) { return { ok: false, error: e.message }; });
+  }
+
+  var LARGE_OP_KEYWORDS = ['DeleteSection','Delete','Close','SaveAs','Replace','bulk','for ','while ','.Range(','Paragraphs.Count'];
+  function isLargeOperation(code) {
+    return LARGE_OP_KEYWORDS.some(function(kw) { return code.indexOf(kw) !== -1; });
+  }
+
+  function executeWithStrategy(code, forceSnapshot) {
+    var large = forceSnapshot || isLargeOperation(code);
+    if (large) {
+      return snapshotDocument().then(function(snap) {
+        if (!snap.ok && snap.unsaved) {
+          // 文档未保存，明确阻止（避免无法恢复）
+          return { success: false, error: snap.error, needSnapshot: true };
+        }
+        // 快照失败（文件锁/路径无效等）→ 降级为无快照直接执行
+        return executeJSA(code);
+      });
+    }
+    return executeJSA(code);
+  }
+
+  // ============================================================
+  // API Service
+  // ============================================================
+  var API_BASE = window.location.origin;
+
+  function healthCheck() {
+    return fetch(API_BASE + '/api/health').then(function(r) { return r.json(); });
+  }
+  function getConfig() {
+    return fetch(API_BASE + '/api/config').then(function(r) { return r.json(); });
+  }
+  function saveConfig(data) {
+    return fetch(API_BASE + '/api/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data)
+    }).then(function(r) { return r.json(); });
+  }
+
+  function chatStream(messages, onChunk) {
+    return fetch(API_BASE + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: messages, stream: true })
+    }).then(function(res) {
+      if (!res.ok) return res.json().catch(function() { return { detail: res.statusText }; }).then(function(err) { throw new Error(err.detail || 'HTTP ' + res.status); });
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      var fullText = '';
+      function read() {
+        return reader.read().then(function(ref) {
+          var done = ref.done, value = ref.value;
+          if (done) return fullText;
+          buffer += decoder.decode(value, { stream: true });
+          var lines = buffer.split('\n');
+          buffer = lines.pop();
+          lines.forEach(function(line) {
+            if (!line.startsWith('data: ')) return;
+            var data = line.slice(6).trim();
+            if (data === '[DONE]') return;
+            try {
+              var chunk = JSON.parse(data);
+              if (chunk.error) throw new Error(chunk.error);
+              var content = (chunk.choices && chunk.choices[0] && chunk.choices[0].delta && chunk.choices[0].delta.content) || '';
+              if (content) { fullText += content; onChunk(fullText); }
+            } catch(e) { if (e.message && e.message.indexOf('JSON') === -1) throw e; }
+          });
+          return read();
+        });
+      }
+      return read();
+    });
+  }
+
+  function listSessions() {
+    return fetch(API_BASE + '/api/sessions').then(function(r) { return r.json(); });
+  }
+  function loadSession(id) {
+    return fetch(API_BASE + '/api/sessions/' + id).then(function(r) { return r.json(); });
+  }
+  function saveSession(messages, title) {
+    return fetch(API_BASE + '/api/sessions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: messages, title: title })
+    }).then(function(r) { return r.json(); });
+  }
+  function deleteSession(id) {
+    return fetch(API_BASE + '/api/sessions/' + id, { method: 'DELETE' }).then(function(r) { return r.json(); });
+  }
+  function saveDraft(messages) {
+    fetch(API_BASE + '/api/sessions/draft', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: messages })
+    }).catch(function() {});
+  }
+  function loadDraft() {
+    return fetch(API_BASE + '/api/sessions/draft/load').then(function(r) { return r.json(); }).catch(function() { return { messages: [] }; });
+  }
+
+  // ============================================================
+  // App UI Logic
+  // ============================================================
+  var chatHistory = [];
+  var isStreaming = false;
+  var hasJsaExecuted = false;
+  var pdfExtractedText = null;
+  var pdfFilePath = null;
+
+  function $(id) { return document.getElementById(id); }
+
+  var msgContainer   = $('messages');
+  var userInput      = $('user-input');
+  var btnSend        = $('btn-send');
+  var btnUndo        = $('btn-undo');
+  var btnHistory     = $('btn-history');
+  var btnNew         = $('btn-new');
+  var btnSettings    = $('btn-settings');
+  var statusDot      = $('status-dot');
+  var statusText     = $('status-text');
+  var ctxIndicator   = $('ctx-indicator');
+  var docSelWrap     = $('doc-selector-wrap');
+  var docSel         = $('doc-selector');
+  var pdfBar         = $('pdf-bar');
+  var pdfInfo        = $('pdf-info');
+  var pdfMaxPagesEl  = $('pdf-max-pages');
+  var btnPdfExtract  = $('btn-pdf-extract');
+  var historyPanel   = $('history-panel');
+  var settingsPanel  = $('settings-panel');
+  var backdrop       = $('backdrop');
+  var historyList    = $('history-list');
+  var chatContainer  = $('chat-container');
+
+  function setStatus(dot, text) {
+    statusDot.className = 'dot dot-' + dot;
+    statusText.textContent = text;
+  }
+
+  function showCtxIndicator(text) {
+    ctxIndicator.textContent = text;
+    ctxIndicator.classList.remove('hidden');
+    setTimeout(function() { ctxIndicator.classList.add('hidden'); }, 4000);
+  }
+
+  function delay(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+
+  function waitForServer(maxAttempts) {
+    maxAttempts = maxAttempts || 30;
+    var i = 0;
+    function attempt() {
+      if (i >= maxAttempts) return Promise.resolve(false);
+      return healthCheck().then(function(data) {
+        if (data.status === 'ok') return true;
+        i++;
+        setStatus('yellow', '连接服务中... (' + i + '/' + maxAttempts + ')');
+        return delay(2000).then(attempt);
+      }).catch(function() {
+        i++;
+        setStatus('yellow', '连接服务中... (' + i + '/' + maxAttempts + ')');
+        return delay(2000).then(attempt);
+      });
+    }
+    return attempt();
+  }
+
+  function refreshDocSelector() {
+    var docs = listOpenDocuments();
+    docSel.innerHTML = '';
+    if (docs.length === 0) {
+      docSel.innerHTML = '<option>（无打开文档）</option>';
+      return;
+    }
+    docs.forEach(function(d) {
+      var opt = document.createElement('option');
+      opt.value = d.index;
+      opt.textContent = d.name;
+      docSel.appendChild(opt);
+    });
+  }
+
+  function setPDFInfo(text, ok) {
+    pdfInfo.textContent = text;
+    pdfInfo.style.color = ok ? '#2e7d32' : '#b71c1c';
+  }
+
+  function doExtractPDF() {
+    var path = WPS.getPDFPath();
+    if (!path) {
+      setPDFInfo('无法获取 PDF 路径，请确认 WPS PDF 已打开文件', false);
+      return;
+    }
+    pdfFilePath = path;
+    var maxPages = parseInt(pdfMaxPagesEl.value) || 50;
+    setPDFInfo('正在提取中...', false);
+    btnPdfExtract.disabled = true;
+    fetch(API_BASE + '/api/pdf/extract', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_path: path, max_pages: maxPages })
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      btnPdfExtract.disabled = false;
+      if (!data.ok) { setPDFInfo('提取失败：' + data.error, false); return; }
+      pdfExtractedText = data.text;
+      var truncNote = data.truncated ? '（内容已截取）' : '';
+      setPDFInfo('已提取 ' + data.extracted_pages + '/' + data.page_count + ' 页，共 ' + data.char_count + ' 字' + truncNote, true);
+      userInput.placeholder = '请问关于这份 PDF 的任何问题...';
+    }).catch(function(e) {
+      btnPdfExtract.disabled = false;
+      setPDFInfo('提取失败：' + e.message, false);
+    });
+  }
+
+  function refreshWPSStatus() {
+    if (WPS.isAvailable()) {
+      var appType = WPS.detectApp();
+      if (appType === 'pdf') {
+        setStatus('green', 'WPS PDF 已连接');
+        pdfBar.classList.remove('hidden');
+        docSelWrap.classList.add('hidden');
+        chatContainer.classList.remove('with-doc-sel');
+        btnUndo.disabled = true;
+        // Auto-extract on first load
+        if (!pdfExtractedText) doExtractPDF();
+        return;
+      }
+      var appNames = { writer: 'Writer 文字', et: 'ET 表格', wpp: 'WPP 演示', unknown: '未知' };
+      setStatus('green', 'WPS ' + (appNames[appType] || appType) + ' 已连接');
+      pdfBar.classList.add('hidden');
+      refreshDocSelector();
+      docSelWrap.classList.remove('hidden');
+      chatContainer.classList.add('with-doc-sel');
+    } else {
+      setStatus('gray', 'WPS 未检测到（独立预览模式）');
+      docSelWrap.classList.add('hidden');
+      pdfBar.classList.add('hidden');
+      chatContainer.classList.remove('with-doc-sel');
+    }
+  }
+
+  function scrollToBottom() { chatContainer.scrollTop = chatContainer.scrollHeight; }
+
+  function createMessageEl(role) {
+    var wrap = document.createElement('div');
+    wrap.className = 'message ' + role;
+    var bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    wrap.appendChild(bubble);
+    msgContainer.appendChild(wrap);
+    scrollToBottom();
+    return { wrap: wrap, bubble: bubble };
+  }
+
+  function renderUserMessage(text) {
+    var ref = createMessageEl('user');
+    ref.bubble.textContent = text;
+  }
+
+  function renderTyping() {
+    var ref = createMessageEl('ai');
+    ref.bubble.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+    return ref;
+  }
+
+  function parseAIResponse(raw) {
+    var cleaned = raw.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
+    try { return JSON.parse(cleaned); } catch(_) { return { message: raw, jsa_code: null }; }
+  }
+
+  function escHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function renderCodeBlock(code) {
+    var codeWrap = document.createElement('div');
+    codeWrap.className = 'code-block-wrap';
+
+    var header = document.createElement('div');
+    header.className = 'code-block-header';
+
+    var label = document.createElement('span');
+    label.textContent = 'JSA 代码';
+
+    var btnGroup = document.createElement('span');
+    btnGroup.style.cssText = 'display:flex;gap:6px;align-items:center';
+
+    var copyBtn = document.createElement('button');
+    copyBtn.className = 'copy-btn';
+    copyBtn.textContent = '复制';
+    copyBtn.onclick = function() {
+      navigator.clipboard && navigator.clipboard.writeText(code).then(function() {
+        copyBtn.textContent = '✓';
+        setTimeout(function() { copyBtn.textContent = '复制'; }, 1500);
+      });
+    };
+
+    var resultDiv = document.createElement('div');
+    resultDiv.className = 'exec-result hidden';
+
+    var runBtn = document.createElement('button');
+    runBtn.className = 'run-btn';
+    runBtn.textContent = '执行';
+    runBtn.onclick = function() { handleRunCode(code, resultDiv, runBtn); };
+
+    btnGroup.appendChild(copyBtn);
+    btnGroup.appendChild(runBtn);
+    header.appendChild(label);
+    header.appendChild(btnGroup);
+
+    var pre = document.createElement('pre');
+    pre.className = 'code-block';
+    pre.textContent = code;
+
+    codeWrap.appendChild(header);
+    codeWrap.appendChild(pre);
+    codeWrap.appendChild(resultDiv);
+    return codeWrap;
+  }
+
+  function showResult(el, ok, msg) {
+    el.className = 'exec-result ' + (ok ? 'ok' : 'err');
+    el.textContent = ok ? '✓ ' + msg : '✗ ' + msg;
+  }
+
+  function handleRunCode(code, resultDiv, runBtn) {
+    if (!WPS.isAvailable()) {
+      showResult(resultDiv, false, '请在 WPS 中打开此页面后再执行代码');
+      return;
+    }
+    runBtn.disabled = true;
+    runBtn.textContent = '执行中...';
+    executeWithStrategy(code, false).then(function(result) {
+      runBtn.disabled = false;
+      runBtn.textContent = '执行';
+      if (result.success) {
+        hasJsaExecuted = true;
+        btnUndo.disabled = false;
+        showResult(resultDiv, true, '执行成功');
+      } else {
+        showResult(resultDiv, false, result.error || '执行失败');
+        if (result.error) sendCorrectionRequest(code, result.error);
+      }
+    });
+  }
+
+  function renderAIMessage(parsed, rawText) {
+    var ref = createMessageEl('ai');
+    ref.bubble.textContent = parsed.message || rawText;
+
+    var actions = document.createElement('div');
+    actions.className = 'message-actions';
+
+    if (parsed.jsa_code && parsed.jsa_code.trim()) {
+      var codeWrap = renderCodeBlock(parsed.jsa_code);
+      ref.wrap.appendChild(codeWrap);
+
+      var undoBtn = document.createElement('button');
+      undoBtn.className = 'msg-btn';
+      undoBtn.textContent = '↩ 撤销';
+      undoBtn.onclick = function() { handleUndo(); };
+      actions.appendChild(undoBtn);
+
+      if (getLastSnapshot()) {
+        var restoreBtn = document.createElement('button');
+        restoreBtn.className = 'msg-btn danger';
+        restoreBtn.textContent = '🔄 恢复快照';
+        restoreBtn.onclick = function() { handleRestore(); };
+        actions.appendChild(restoreBtn);
+      }
+    }
+
+    if (actions.children.length > 0) ref.wrap.appendChild(actions);
+    scrollToBottom();
+  }
+
+  function sendMessage(userText) {
+    if (!userText.trim() || isStreaming) return;
+    isStreaming = true;
+    btnSend.disabled = true;
+    userInput.value = '';
+
+    return getDocumentContext().then(function(ctx) {
+      var prefix = buildContextPrefix(ctx);
+      if (prefix) {
+        var label = ctx.selectedText ? '📄 已附加选中文字' : '📄 已附加当前段落';
+        if (ctx.selectedTruncated || ctx.paragraphTruncated) label += '（已截取）';
+        showCtxIndicator(label);
+      }
+
+      var fullContent = prefix + userText;
+      chatHistory.push({ role: 'user', content: fullContent });
+      renderUserMessage(userText);
+
+      var typing = renderTyping();
+
+      return chatStream(chatHistory, function(accumulated) {
+        typing.bubble.innerHTML = '';
+        var parsed = parseAIResponse(accumulated);
+        typing.bubble.textContent = parsed.message || accumulated;
+      }).then(function(rawText) {
+        typing.wrap.remove();
+        var parsed = parseAIResponse(rawText);
+        chatHistory.push({ role: 'assistant', content: rawText });
+        renderAIMessage(parsed, rawText);
+        saveDraft(chatHistory);
+      }).catch(function(e) {
+        typing.bubble.textContent = '请求失败: ' + e.message;
+      }).then(function() {
+        isStreaming = false;
+        btnSend.disabled = false;
+        userInput.focus();
+      });
+    });
+  }
+
+  function sendCorrectionRequest(code, errorMsg) {
+    var correctionText = '刚才生成的代码执行出错：「' + errorMsg + '」。代码如下：\n```\n' + code + '\n```\n请分析原因并提供修正后的版本。';
+    sendMessage(correctionText);
+  }
+
+  function handleUndo() {
+    if (!WPS.isAvailable()) return;
+    undoLastJSA(1).then(function(result) {
+      setStatus(result.success ? 'green' : 'red', result.success ? '✓ 已撤销' : '✗ 撤销失败: ' + result.error);
+      setTimeout(function() { refreshWPSStatus(); }, 2500);
+    });
+  }
+
+  function handleRestore() {
+    var snap = getLastSnapshot();
+    if (!snap) return;
+    if (!confirm('确定要恢复到执行前的快照状态吗？当前所有修改将被覆盖。')) return;
+    restoreSnapshot().then(function(result) {
+      if (result.ok) {
+        clearSnapshot();
+        setStatus('green', '✓ 已恢复快照');
+      } else {
+        setStatus('red', '✗ 恢复失败: ' + result.error);
+      }
+      setTimeout(function() { refreshWPSStatus(); }, 2500);
+    });
+  }
+
+  function openPanel(panel) {
+    panel.classList.remove('hidden');
+    setTimeout(function() { panel.classList.add('open'); }, 10);
+    backdrop.classList.remove('hidden');
+  }
+
+  function closePanel(panel) {
+    panel.classList.remove('open');
+    setTimeout(function() { panel.classList.add('hidden'); }, 260);
+    backdrop.classList.add('hidden');
+  }
+
+  function openHistoryPanel() {
+    openPanel(historyPanel);
+    historyList.innerHTML = '<div class="history-empty">加载中...</div>';
+    listSessions().then(function(sessions) {
+      if (sessions.length === 0) {
+        historyList.innerHTML = '<div class="history-empty">暂无历史记录</div>';
+        return;
+      }
+      historyList.innerHTML = '';
+      sessions.forEach(function(s) {
+        var item = document.createElement('div');
+        item.className = 'history-item';
+        item.innerHTML = '<div class="history-item-info"><div class="history-item-title">' + escHtml(s.title || '无标题') + '</div><div class="history-item-meta">' + (s.created_at ? s.created_at.slice(0, 16) : '') + ' · ' + s.message_count + ' 条消息</div></div><button class="history-item-del" title="删除">🗑</button>';
+        item.querySelector('.history-item-del').onclick = function(e) {
+          e.stopPropagation();
+          if (!confirm('确定删除此记录？')) return;
+          deleteSession(s.id).then(function() {
+            item.remove();
+            if (historyList.children.length === 0) historyList.innerHTML = '<div class="history-empty">暂无历史记录</div>';
+          });
+        };
+        item.onclick = function() {
+          loadSession(s.id).then(function(data) {
+            loadConversation(data.messages || []);
+            closePanel(historyPanel);
+          });
+        };
+        historyList.appendChild(item);
+      });
+    }).catch(function(e) {
+      historyList.innerHTML = '<div class="history-empty">加载失败: ' + e.message + '</div>';
+    });
+  }
+
+  function loadConversation(messages) {
+    chatHistory = messages;
+    msgContainer.innerHTML = '';
+    messages.forEach(function(m) {
+      if (m.role === 'user') renderUserMessage(m.content);
+      else if (m.role === 'assistant') renderAIMessage(parseAIResponse(m.content), m.content);
+    });
+  }
+
+  function openSettingsPanel() {
+    openPanel(settingsPanel);
+    getConfig().then(function(cfg) {
+      $('s-api-key').placeholder = cfg.api_key_masked ? '当前: ' + cfg.api_key_masked : '请输入 API Key';
+      $('s-model').value = cfg.model || '';
+      $('s-base-url').value = cfg.base_url || '';
+      $('s-temperature').value = cfg.temperature != null ? cfg.temperature : 0.3;
+      $('s-max-tokens').value = cfg.max_tokens != null ? cfg.max_tokens : 2048;
+    }).catch(function() {});
+  }
+
+  function saveSettings() {
+    var msg = $('settings-msg');
+    var data = {
+      model: $('s-model').value.trim(),
+      base_url: $('s-base-url').value.trim(),
+      temperature: parseFloat($('s-temperature').value),
+      max_tokens: parseInt($('s-max-tokens').value, 10)
+    };
+    var key = $('s-api-key').value.trim();
+    if (key) data.api_key = key;
+    saveConfig(data).then(function() {
+      msg.className = '';
+      msg.textContent = '✓ 设置已保存';
+      $('s-api-key').value = '';
+      $('s-api-key').placeholder = '已保存（留空则不修改）';
+      setTimeout(function() { msg.textContent = ''; }, 3000);
+    }).catch(function(e) {
+      msg.className = 'error';
+      msg.textContent = '保存失败: ' + e.message;
+    });
+  }
+
+  function testConnection() {
+    var msg = $('settings-msg');
+    msg.className = '';
+    msg.textContent = '测试中...';
+    healthCheck().then(function(data) {
+      if (data.config_loaded) {
+        msg.textContent = '✓ 连接正常，API Key 已配置';
+      } else {
+        msg.className = 'error';
+        msg.textContent = '⚠ 服务正常但 API Key 未配置';
+      }
+    }).catch(function(e) {
+      msg.className = 'error';
+      msg.textContent = '✗ 连接失败: ' + e.message;
+    });
+  }
+
+  function newConversation() {
+    if (chatHistory.length > 0) {
+      if (!confirm('当前对话将被保存，确认开始新对话？')) return;
+      saveSession(chatHistory);
+    }
+    chatHistory = [];
+    msgContainer.innerHTML = '';
+    clearSnapshot();
+    hasJsaExecuted = false;
+    btnUndo.disabled = true;
+    saveDraft([]);
+  }
+
+  // Event listeners
+  btnSend.addEventListener('click', function() { sendMessage(userInput.value); });
+  userInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(userInput.value); }
+  });
+  btnUndo.addEventListener('click', handleUndo);
+  btnNew.addEventListener('click', newConversation);
+  btnHistory.addEventListener('click', openHistoryPanel);
+  $('btn-history-close').addEventListener('click', function() { closePanel(historyPanel); });
+  btnSettings.addEventListener('click', openSettingsPanel);
+  $('btn-settings-close').addEventListener('click', function() { closePanel(settingsPanel); });
+  $('btn-save-settings').addEventListener('click', saveSettings);
+  $('btn-test-conn').addEventListener('click', testConnection);
+  backdrop.addEventListener('click', function() { closePanel(historyPanel); closePanel(settingsPanel); });
+  docSel.addEventListener('focus', refreshDocSelector);
+  btnPdfExtract.addEventListener('click', doExtractPDF);
+  document.addEventListener('keydown', function(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      if (!btnUndo.disabled) handleUndo();
+    }
+  });
+
+  // Init
+  function init() {
+    setStatus('yellow', '正在连接服务...');
+    waitForServer(30).then(function(ok) {
+      if (!ok) {
+        setStatus('red', '服务连接失败，请检查 wps_agent.exe 是否运行');
+        return;
+      }
+      refreshWPSStatus();
+      return loadDraft().then(function(draft) {
+        if (draft.messages && draft.messages.length > 0) loadConversation(draft.messages);
+      }).catch(function() {});
+    }).then(function() {
+      userInput.focus();
+    });
+  }
+
+  init();
+  </script>
+</body>
+</html>
